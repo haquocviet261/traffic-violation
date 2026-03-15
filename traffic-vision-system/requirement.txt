@@ -1,0 +1,278 @@
+You are a senior frontend engineer.
+
+IMPORTANT:
+I already have an existing working project.
+DO NOT create a new project.
+DO NOT rewrite everything from scratch.
+
+Your task is to **improve and extend the existing frontend codebase only**.
+
+You must work **on top of the current project structure** and modify files where appropriate.
+
+---
+
+PROJECT CONTEXT
+
+This project analyzes traffic videos and detects traffic violations.
+
+Backend:
+Spring Boot (already implemented)
+
+The backend already provides:
+
+* uploaded video
+* analysis results
+* vehicle bounding boxes
+* violation events
+* traffic light rectangles
+* stop lines
+
+Frontend:
+React (currently basic UI)
+
+---
+
+STRICT RULES
+
+You MUST follow these rules:
+
+1. DO NOT rebuild the project from scratch
+2. DO NOT delete existing features
+3. DO NOT modify backend APIs
+4. DO NOT introduce any AI or ML libraries
+5. ONLY improve the frontend
+6. ONLY extend the UI and interaction features
+7. Preserve existing functionality
+
+---
+
+GOAL
+
+Upgrade the existing frontend into a **modern traffic monitoring dashboard** while keeping the existing project.
+
+The UI must be:
+
+* modern
+* clean
+* responsive
+* professional
+
+---
+
+TECH STACK UPGRADE
+
+Upgrade the existing React code to:
+
+React + TypeScript + Ant Design
+
+But keep the existing logic and reuse as much code as possible.
+
+---
+
+UI IMPROVEMENTS
+
+Replace basic UI components with Ant Design components where appropriate:
+
+Use:
+
+Layout
+Sider
+Header
+Content
+Card
+Table
+Tag
+Statistic
+Slider
+Upload
+Tabs
+Timeline
+Drawer
+Tooltip
+Badge
+
+---
+
+DASHBOARD LAYOUT
+
+Transform the current UI into a dashboard layout.
+
+Layout:
+
+Sidebar
+
+* Dashboard
+* Upload
+* Analysis
+
+Main Content:
+
+Top section
+Video player with overlay canvas
+
+Middle section
+Violation timeline + frame scrubber
+
+Bottom section
+Violation table + statistics
+
+---
+
+VIDEO PLAYER IMPROVEMENT
+
+Improve the existing video player.
+
+Add:
+
+canvas overlay rendering
+
+Draw:
+
+vehicle bounding boxes
+traffic lights
+stop lines
+
+Color rules:
+
+vehicles → green
+violations → red
+traffic lights → blue
+stop lines → yellow
+
+Rendering must use requestAnimationFrame for smooth updates.
+
+---
+
+FEATURE 1: VIOLATION TIMELINE
+
+Add a visual timeline under the video player.
+
+Each violation should appear as a marker on the timeline.
+
+Clicking a marker should:
+
+seek the video to that frame
+highlight the violating vehicle
+
+Use Ant Design Timeline or a custom timeline bar.
+
+---
+
+FEATURE 2: FRAME SCRUBBER
+
+Add a frame scrubber using Ant Design Slider.
+
+The slider represents video frames.
+
+Dragging the slider should:
+
+seek the video
+update overlay rendering
+
+---
+
+FEATURE 3: CLICK VEHICLE TO HIGHLIGHT
+
+Allow clicking a vehicle bounding box on the video.
+
+When clicked:
+
+highlight the vehicle
+show vehicle info
+
+Show vehicle details in an Ant Design Drawer.
+
+---
+
+FEATURE 4: VIOLATION REPLAY
+
+Allow replaying a violation.
+
+User clicks replay in:
+
+timeline OR table.
+
+The system should:
+
+seek video to 2 seconds before violation
+auto play
+highlight the violating vehicle
+
+---
+
+FEATURE 5: VEHICLE MOVEMENT HEATMAP
+
+Add a heatmap visualization.
+
+Use vehicle bounding box coordinates across frames.
+
+Aggregate positions and draw a heatmap overlay.
+
+This must be implemented using simple canvas drawing.
+
+DO NOT use any AI libraries.
+
+---
+
+FEATURE 6: VIDEO ANNOTATION EDITOR
+
+Add an annotation tool on the video canvas.
+
+Allow users to draw:
+
+rectangles (traffic light)
+lines (stop line)
+
+Use mouse interaction.
+
+Annotations should appear on the overlay canvas.
+
+---
+
+VIOLATION TABLE
+
+Improve the violations table using Ant Design Table.
+
+Columns:
+
+Vehicle ID
+Event Type
+Frame
+Timestamp
+Replay Button
+
+Event type should use colored Tags.
+
+---
+
+DASHBOARD STATISTICS
+
+Add statistic cards using Ant Design Statistic:
+
+Total Vehicles
+Total Violations
+Video Duration
+Total Frames
+
+---
+
+PERFORMANCE IMPROVEMENT
+
+Optimize rendering:
+
+Group events by frame
+Render only events for the current frame
+
+Avoid iterating through all events every frame.
+
+---
+
+OUTPUT FORMAT
+
+When modifying the project:
+
+1. Show which existing files should be modified
+2. Show new components to add
+3. Provide updated TypeScript versions of existing components
+4. Explain where each new component should be integrated
+5. Do not rewrite the entire project unnecessarily

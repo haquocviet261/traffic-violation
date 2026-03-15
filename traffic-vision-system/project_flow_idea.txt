@@ -1,0 +1,146 @@
+TRAFFIC VISION SYSTEM – PROCESSING PIPELINE
+
+The system analyzes traffic video using classical image processing techniques with OpenCV.
+
+Each frame is processed independently for base detection, with minimal temporal context for violation crossing logic. No AI/ML models are used.
+
+---
+
+## FRAME PROCESSING PIPELINE
+
+For every frame extracted from the video, the following steps are executed.
+
+1. STOP LINE DETECTION
+
+Goal:
+Detect the road stop line that vehicles should not cross during a red light.
+
+Steps:
+
+* Convert frame to grayscale
+* Apply Gaussian blur to reduce noise
+* Apply Canny edge detection
+* Apply Hough Line Transform to detect straight lines
+* Filter lines that are approximately horizontal (angle < 10 degrees)
+* Select the line in the lower-middle road region closest to the camera (max Y coordinate)
+
+Output:
+stopLineY (vertical position of the stop line)
+
+---
+
+2. TRAFFIC LIGHT DETECTION
+
+Goal:
+Determine the current traffic light color.
+
+Steps:
+
+* Convert frame to HSV color space
+* Apply color thresholding to detect:
+
+  * RED
+  * GREEN
+  * YELLOW
+* Use contour detection to identify colored regions
+* Select the traffic light region with the largest contour
+
+Optimization:
+Traffic light detection runs once every 30 frames. Detections are merged across frames using coordinate proximity to identify unique physical lights.
+
+Output:
+trafficLightState (RED, GREEN, YELLOW, or UNKNOWN)
+
+---
+
+3. VEHICLE DETECTION
+
+Goal:
+Detect possible vehicles in the frame.
+
+Steps:
+
+* Use motion detection or background subtraction to identify moving objects
+* Apply contour detection on the motion mask
+* Filter contours using area and aspect ratio thresholds
+* Create bounding boxes for valid contours
+
+Output:
+List of vehicle bounding boxes
+
+---
+
+4. RED LIGHT VIOLATION DETECTION
+
+Goal:
+Detect vehicles that cross the stop line while the traffic light is RED.
+
+Logic:
+The system tracks the centroid of each vehicle between the previous and current frame.
+
+Condition:
+A RED_LIGHT_VIOLATION is triggered if:
+1. trafficLightState == RED
+2. previousCentroidY <= stopLineY
+3. currentCentroidY > stopLineY
+
+Output:
+Violation event with evidence capture (cropped vehicle image).
+
+---
+
+5. VIOLATION EVENT DATA
+
+Each detected violation stores:
+
+* event_type: RED_LIGHT_VIOLATION
+* video_id
+* frame_number
+* timestamp
+* bbox (x, y, width, height)
+* image_path (path to evidence capture)
+
+---
+
+6. VISUALIZATION
+
+To ensure a professional analysis experience, the system only displays critical overlays on the video. Debug boxes are disabled.
+
+Overlays include:
+
+* **Stop Line:** A horizontal yellow line indicating the detection boundary.
+* **Vehicle Movement:** Centroid markers and trajectory lines for tracking context.
+* **Violations:** When a violation occurrs, a RED bounding box and "RED LIGHT VIOLATION" label are added to the evidence capture.
+
+---
+
+7. SYSTEM CONSTRAINTS
+
+The implementation MUST follow these constraints:
+
+* No AI models (YOLO, TensorFlow, PyTorch, etc.)
+* Minimal temporal context (only adjacent frames for crossing logic)
+* All detection relies on classical computer vision methods:
+    * grayscale conversion
+    * Gaussian blur
+    * edge detection (Canny)
+    * Hough transform
+    * color thresholding (HSV)
+    * contour detection
+
+---
+
+8. DASHBOARD AND STATISTICS
+
+The system provides aggregate statistics:
+
+* **Total Vehicle Detections:** Sum of detections across all frames.
+* **Unique Traffic Lights:** Count of spatially distinct light instances identified.
+* **Red Light Violations:** Total count of crossing events during RED state.
+* **Traffic Density:** Average vehicles per frame.
+
+---
+
+9. FINAL ARCHITECTURAL MANDATE
+
+The system maintains high accuracy by combining refined spatial filtering (Stop Line) with temporal crossing logic (Centroids). No AI-based inference is permitted.
