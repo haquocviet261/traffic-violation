@@ -34,8 +34,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 @Service
 public class VideoProcessingService {
@@ -122,7 +124,6 @@ public class VideoProcessingService {
             return;
         }
 
-        // --- VideoWriter Initialization ---
         double fps = cap.get(Videoio.CAP_PROP_FPS);
         if (fps <= 0) fps = 30.0;
         int width = (int) cap.get(Videoio.CAP_PROP_FRAME_WIDTH);
@@ -130,8 +131,7 @@ public class VideoProcessingService {
         String processedFilename = "processed_" + video.getFilename();
         String outputPath = Paths.get(UPLOAD_DIR, processedFilename).toAbsolutePath().toString();
         
-        // H264/AVC1 is best for browsers. FALLBACK to MP4V if needed.
-        int fourcc = VideoWriter.fourcc('a', 'v', 'c', '1'); 
+        int fourcc = VideoWriter.fourcc('a', 'v', 'c', '1');
         VideoWriter writer = new VideoWriter(outputPath, fourcc, fps, new Size(width, height));
 
         if (!writer.isOpened()) {
@@ -139,6 +139,7 @@ public class VideoProcessingService {
             fourcc = VideoWriter.fourcc('m', 'p', '4', 'v');
             writer = new VideoWriter(outputPath, fourcc, fps, new Size(width, height));
         }
+        ExecutorService frameExecutor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
 
         Mat frame = new Mat();
         int totalVehicleDetections = 0;
@@ -151,46 +152,82 @@ public class VideoProcessingService {
 
         try {
             while (cap.read(frame)) {
-                if (frame.empty()) {
-                    break;
-                }
+                if (frame.empty()) break;
 
-                // 1. Detect stop line
-                Double stopLineY = stopLineDetector.detectStopLineY(frame);
+                // Clone frame để tránh conflict giữa các thread
+                Mat vehicleFrame = frame.clone();
+                Mat stopLineFrame = frame.clone();
+                Mat lightFrame = frame.clone();
+
+                // ---- Run parallel tasks ----
+                Future<List<Rect>> vehicleFuture = frameExecutor.submit(() ->
+                        vehicleDetectionService.detectVehicles(vehicleFrame)
+                );
+
+                Future<Double> stopLineFuture = frameExecutor.submit(() ->
+                        stopLineDetector.detectStopLineY(stopLineFrame, videoId)
+                );
+
+                Future<String> lightFuture = frameExecutor.submit(() ->
+                        trafficLightDetector.getTrafficLightState(lightFrame, videoId)
+                );
+
+                // ---- Get results ----
+                List<Rect> vehicleRects = vehicleFuture.get();
+                Double stopLineY = stopLineFuture.get();
+                currentTrafficLightState = lightFuture.get();
+
                 if (stopLineY != null) totalStopLinesDetected++;
-
-                // 2. Detect traffic light state
-                if (frameCount % 30 == 0) {
-                    currentTrafficLightState = trafficLightDetector.getTrafficLightState(frame);
-                    List<Rect> trafficLightRects = trafficLightDetector.detectTrafficLights(frame);
-                    mergeUniqueLights(trafficLightRects, uniqueTrafficLights);
-                    
-                    List<org.opencv.core.Point[]> stopLinePoints = new ArrayList<>();
-                    if (stopLineY != null) {
-                        stopLinePoints.add(new org.opencv.core.Point[]{new org.opencv.core.Point(0, stopLineY), new org.opencv.core.Point(frame.cols(), stopLineY)});
-                    }
-                    lastDetectionResult = new DetectionResult(trafficLightRects, stopLinePoints, vehicleDetectionService.detectVehicles(frame));
-                }
-
-                // 3. Detect vehicles
-                List<Rect> vehicleRects = vehicleDetectionService.detectVehicles(frame);
                 totalVehicleDetections += vehicleRects.size();
 
-                // 4. Red light violation detection (Draws overlays on 'frame')
-                totalViolationCount += violationDetectionService.detectViolations(frame, vehicleRects, stopLineY, currentTrafficLightState, videoId, frameCount);
+                // ---- Detect traffic light rectangles mỗi 30 frame ----
+                if (frameCount % 30 == 0) {
+                    List<Rect> trafficLightRects = trafficLightDetector.detectTrafficLights(frame);
+                    mergeUniqueLights(trafficLightRects, uniqueTrafficLights);
 
-                // --- Write processed frame to output video ---
+                    List<org.opencv.core.Point[]> stopLinePoints = new ArrayList<>();
+                    if (stopLineY != null) {
+                        stopLinePoints.add(new org.opencv.core.Point[]{
+                                new org.opencv.core.Point(0, stopLineY),
+                                new org.opencv.core.Point(frame.cols(), stopLineY)
+                        });
+                    }
+
+                    lastDetectionResult = new DetectionResult(
+                            trafficLightRects,
+                            stopLinePoints,
+                            vehicleRects
+                    );
+                }
+
+                // ---- Violation detection ----
+                totalViolationCount += violationDetectionService.detectViolations(
+                        frame,
+                        vehicleRects,
+                        stopLineY,
+                        currentTrafficLightState,
+                        videoId,
+                        frameCount
+                );
+
+                // ---- Write frame ----
                 if (writer.isOpened()) {
                     writer.write(frame);
                 }
 
                 frameCount++;
             }
-        } finally {
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt(); // rất quan trọng
+            logger.error("Thread interrupted while processing video {}", videoId, e);
+
+        } catch (ExecutionException e) {
+            logger.error("Error in async detection thread for video {}", videoId, e);
+        }
+        finally {
+            frameExecutor.shutdown();
             cap.release();
-            if (writer != null && writer.isOpened()) {
-                writer.release();
-            }
+            if (writer.isOpened()) writer.release();
             frame.release();
         }
 
@@ -225,6 +262,8 @@ public class VideoProcessingService {
         video.setStatus("COMPLETED");
         videoRepository.save(video);
         violationDetectionService.clearHistory(videoId);
+        stopLineDetector.clearHistory(videoId);
+        trafficLightDetector.clearHistory(videoId);
 
         logger.info("Finished OpenCV processing for video: {}", video.getFilename());
         logger.info("Total violations detected: {}", totalViolationCount);

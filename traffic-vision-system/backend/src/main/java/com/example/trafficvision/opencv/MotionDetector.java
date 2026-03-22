@@ -19,10 +19,8 @@ public class MotionDetector {
     }
 
     public Mat detectMotion(Mat frame) {
-        // Apply background subtraction
         bgSubtractor.apply(frame, fgMask);
 
-        // Apply morphological operations to clean up the mask
         Mat kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, new Size(3, 3));
         Imgproc.erode(fgMask, fgMask, kernel);
         Imgproc.dilate(fgMask, fgMask, kernel);
@@ -31,10 +29,4 @@ public class MotionDetector {
         return fgMask;
     }
 
-    public void release() {
-        if (fgMask != null) {
-            fgMask.release();
-        }
-        // bgSubtractor doesn't have a release method, it's managed by JVM GC
-    }
 }

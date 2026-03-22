@@ -10,14 +10,12 @@ import java.util.List;
 @Component
 public class ContourVehicleDetector {
 
-    // Minimum contour area to consider as a vehicle (adjust as needed)
-    private static final double MIN_VEHICLE_AREA = 500;
+    private static final double MIN_VEHICLE_AREA = 450;
 
     public List<Rect> detectVehicles(Mat motionMask) {
         List<MatOfPoint> contours = new ArrayList<>();
         Mat hierarchy = new Mat();
 
-        // Find contours in the motion mask
         Imgproc.findContours(motionMask, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE);
 
         List<Rect> vehicleBoundingBoxes = new ArrayList<>();
@@ -28,9 +26,9 @@ public class ContourVehicleDetector {
                 Rect boundingRect = Imgproc.boundingRect(contour);
                 vehicleBoundingBoxes.add(boundingRect);
             }
-            contour.release(); // Release native memory
+            contour.release();
         }
-        hierarchy.release(); // Release native memory
+        hierarchy.release();
         return vehicleBoundingBoxes;
     }
 }

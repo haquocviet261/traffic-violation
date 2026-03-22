@@ -1,146 +1,122 @@
 TRAFFIC VISION SYSTEM – PROCESSING PIPELINE
 
-The system analyzes traffic video using classical image processing techniques with OpenCV.
+The system analyzes traffic video using classical image processing techniques with OpenCV 4.9.0, integrated within a Java Spring Boot backend.
 
-Each frame is processed independently for base detection, with minimal temporal context for violation crossing logic. No AI/ML models are used.
+Each frame is processed using a parallelized pipeline for efficiency, with temporal context maintained for violation crossing logic and state stability. No AI/ML models are used.
+
+---
+
+## SYSTEM ARCHITECTURE & PARALLELISM
+
+To maximize performance, the system utilizes a fixed thread pool (`ExecutorService`) to run detection tasks in parallel for each frame:
+*   **Vehicle Detection:** Foreground extraction and contour analysis.
+*   **Stop Line Detection:** Structural analysis and stabilization.
+*   **Traffic Light Detection:** HSV color segmentation and state tracking.
 
 ---
 
 ## FRAME PROCESSING PIPELINE
 
-For every frame extracted from the video, the following steps are executed.
-
-1. STOP LINE DETECTION
+### 1. STOP LINE DETECTION (Refined)
 
 Goal:
-Detect the road stop line that vehicles should not cross during a red light.
+Detect and stabilize the road stop line in the lower frame region.
 
 Steps:
-
-* Convert frame to grayscale
-* Apply Gaussian blur to reduce noise
-* Apply Canny edge detection
-* Apply Hough Line Transform to detect straight lines
-* Filter lines that are approximately horizontal (angle < 10 degrees)
-* Select the line in the lower-middle road region closest to the camera (max Y coordinate)
+*   **ROI Selection:** Focus on the lower-middle portion of the frame (40% to 75% height).
+*   **Preprocessing:** Convert to grayscale and apply Otsu's Thresholding for automatic light adaptation.
+*   **Morphological Closing:** Use a large horizontal kernel (60x3) to connect dashed or worn stop line segments.
+*   **Edge & Line Detection:** Apply Canny edges and Hough Line Transform (HoughLinesP) for structural verification.
+*   **Stabilization:** Use Exponential Smoothing ($\alpha = 0.05$) to maintain a "Stable Y" coordinate, reducing jitter across frames.
 
 Output:
-stopLineY (vertical position of the stop line)
+`stopLineY` (stabilized vertical position)
 
 ---
 
-2. TRAFFIC LIGHT DETECTION
+### 2. TRAFFIC LIGHT DETECTION (Refined)
 
 Goal:
-Determine the current traffic light color.
+Identify the current traffic light state with high stability.
 
 Steps:
-
-* Convert frame to HSV color space
-* Apply color thresholding to detect:
-
-  * RED
-  * GREEN
-  * YELLOW
-* Use contour detection to identify colored regions
-* Select the traffic light region with the largest contour
-
-Optimization:
-Traffic light detection runs once every 30 frames. Detections are merged across frames using coordinate proximity to identify unique physical lights.
+*   **ROI Selection:** Focus on the upper 50% of the frame.
+*   **HSV Color Masking:** Apply dual-range thresholding for RED and single-range for GREEN/YELLOW.
+*   **Contour Analysis:** Identify the largest colored region meeting a minimum area threshold (50 pixels).
+*   **Temporal Smoothing:** Maintain a state history (buffer size 10) and select the dominant state to filter out transient noise.
+*   **Flashing Logic:** Specifically handle "Flashing Red" by analyzing the ratio of RED to UNKNOWN states in the buffer.
 
 Output:
-trafficLightState (RED, GREEN, YELLOW, or UNKNOWN)
+`trafficLightState` (RED, GREEN, YELLOW, or UNKNOWN)
 
 ---
 
-3. VEHICLE DETECTION
+### 3. VEHICLE DETECTION
 
 Goal:
-Detect possible vehicles in the frame.
+Detect moving vehicles using background modeling.
 
 Steps:
-
-* Use motion detection or background subtraction to identify moving objects
-* Apply contour detection on the motion mask
-* Filter contours using area and aspect ratio thresholds
-* Create bounding boxes for valid contours
+*   **Background Subtraction:** Use `BackgroundSubtractorMOG2` to extract the foreground mask.
+*   **Noise Reduction:** Apply morphological Erosion and Dilation (3x3 kernel).
+*   **Contour Extraction:** Identify connected regions with area > 450 pixels.
+*   **Bounding Boxes:** Generate `Rect` coordinates for each valid vehicle.
 
 Output:
-List of vehicle bounding boxes
+List of vehicle bounding boxes.
 
 ---
 
-4. RED LIGHT VIOLATION DETECTION
+### 4. RED LIGHT VIOLATION DETECTION (Updated)
 
 Goal:
-Detect vehicles that cross the stop line while the traffic light is RED.
+Detect vehicles whose tires (bottom of bounding box) cross the stop line while the light is RED.
 
 Logic:
-The system tracks the centroid of each vehicle between the previous and current frame.
+The system tracks the **Bottom-Center point** of each vehicle between frames.
 
 Condition:
-A RED_LIGHT_VIOLATION is triggered if:
-1. trafficLightState == RED
-2. previousCentroidY <= stopLineY
-3. currentCentroidY > stopLineY
+A `RED_LIGHT_VIOLATION` is triggered if:
+1.  `trafficLightState == RED`
+2.  `previousBottomY <= stopLineY`
+3.  `currentBottomY > (stopLineY + 10)` (10-pixel tolerance zone to avoid false positives for vehicles stopping exactly on the line).
 
 Output:
 Violation event with evidence capture (cropped vehicle image).
 
 ---
 
-5. VIOLATION EVENT DATA
+### 5. VIOLATION EVENT DATA
 
 Each detected violation stores:
-
-* event_type: RED_LIGHT_VIOLATION
-* video_id
-* frame_number
-* timestamp
-* bbox (x, y, width, height)
-* image_path (path to evidence capture)
+*   `event_type`: RED_LIGHT_VIOLATION
+*   `video_id`, `frame_number`, `timestamp`
+*   `bbox`: Coordinates and dimensions of the offending vehicle.
+*   `image_path`: Path to the cropped evidence JPG.
 
 ---
 
-6. VISUALIZATION
+### 6. VISUALIZATION & OUTPUT
 
-To ensure a professional analysis experience, the system only displays critical overlays on the video. Debug boxes are disabled.
-
-Overlays include:
-
-* **Stop Line:** A horizontal yellow line indicating the detection boundary.
-* **Vehicle Movement:** Centroid markers and trajectory lines for tracking context.
-* **Violations:** When a violation occurrs, a RED bounding box and "RED LIGHT VIOLATION" label are added to the evidence capture.
+The system produces a processed video with the following overlays:
+*   **Stop Line:** A solid line (Green for active detection, Yellow for estimated).
+*   **Violation Alert:** A Red bounding box and "RED LIGHT VIOLATION" label on the specific frame where the crossing occurred.
+*   **Status Text:** Current traffic light state and stop line status displayed on the frame.
 
 ---
 
-7. SYSTEM CONSTRAINTS
+### 7. SYSTEM CONSTRAINTS
 
-The implementation MUST follow these constraints:
-
-* No AI models (YOLO, TensorFlow, PyTorch, etc.)
-* Minimal temporal context (only adjacent frames for crossing logic)
-* All detection relies on classical computer vision methods:
-    * grayscale conversion
-    * Gaussian blur
-    * edge detection (Canny)
-    * Hough transform
-    * color thresholding (HSV)
-    * contour detection
+*   **No AI/Deep Learning:** Pure OpenCV/Java implementation.
+*   **Surgical Logic:** All detection is based on mathematical thresholds and structural analysis.
+*   **Memory Management:** Explicit release of OpenCV `Mat` objects to prevent leaks during long video processing.
 
 ---
 
-8. DASHBOARD AND STATISTICS
+### 8. ANALYTICS & DASHBOARD
 
-The system provides aggregate statistics:
-
-* **Total Vehicle Detections:** Sum of detections across all frames.
-* **Unique Traffic Lights:** Count of spatially distinct light instances identified.
-* **Red Light Violations:** Total count of crossing events during RED state.
-* **Traffic Density:** Average vehicles per frame.
-
----
-
-9. FINAL ARCHITECTURAL MANDATE
-
-The system maintains high accuracy by combining refined spatial filtering (Stop Line) with temporal crossing logic (Centroids). No AI-based inference is permitted.
+The system calculates:
+*   **Total Vehicle Detections:** Aggregate detections across the video duration.
+*   **Traffic Density:** Average vehicles per frame.
+*   **Violation Count:** Total unique red-light crossing events.
+*   **Stop Line Stability:** Percentage of frames where the stop line was successfully detected vs. estimated.

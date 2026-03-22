@@ -30,51 +30,64 @@ public class ViolationDetectionService {
 
     private final String VIOLATIONS_DIR = "violations";
 
-    // Simple storage for previous frame's centroids per video
-    private final Map<Long, List<Point>> previousFrameCentroids = new ConcurrentHashMap<>();
+    // Tracks vehicle bottom-center points across frames for motion analysis
+    private final Map<Long, List<Point>> previousFrameBottomPoints = new ConcurrentHashMap<>();
 
+    /**
+     * PART 4: RED LIGHT VIOLATION DETECTION
+     * Detects violations based on bottom of vehicle crossing the stop line during a RED light.
+     */
     public int detectViolations(Mat frame, List<Rect> vehicles, Double stopLineY, String trafficLightState, Long videoId, int frameNumber) {
         if (stopLineY == null || vehicles.isEmpty()) {
-            updateCentroids(videoId, vehicles);
+            updateBottomPoints(videoId, vehicles);
             return 0;
         }
 
-        // --- VISUALIZATION: STOP LINE (GREEN) ---
-        Imgproc.line(frame, new Point(0, stopLineY), new Point(frame.cols(), stopLineY), new Scalar(0, 255, 0), 2);
+        // Visualize stop line
+        drawStopLine(frame, stopLineY);
 
-        List<Point> prevCentroids = previousFrameCentroids.getOrDefault(videoId, new ArrayList<>());
+        List<Point> prevBottomPoints = previousFrameBottomPoints.getOrDefault(videoId, new ArrayList<>());
         int violationsInFrame = 0;
+        
+        // Tolerance zone to avoid false violations (vehicle stops slightly over the line)
+        double violationZone = stopLineY + 10;
 
         for (Rect vehicle : vehicles) {
-            Point currentCentroid = new Point(vehicle.x + vehicle.width / 2.0, vehicle.y + vehicle.height / 2.0);
-            
-            // Find best match in previous frame
-            Point bestMatch = findBestMatch(currentCentroid, prevCentroids);
+            double currentBottomY = (double) vehicle.y + vehicle.height;
+            Point currentBottomPoint = new Point(vehicle.x + vehicle.width / 2.0, currentBottomY);
+            Point bestMatch = findBestMatch(currentBottomPoint, prevBottomPoints);
 
-            if (bestMatch != null) {
-                // VIOLATION RULE: RED Light AND Crossing (prevY <= stopLineY AND currY > stopLineY)
-                if ("RED".equals(trafficLightState) && bestMatch.y <= stopLineY && currentCentroid.y > stopLineY) {
-                    logger.info("Violation Detected: VehicleY={}, StopLineY={}", (int)currentCentroid.y, stopLineY.intValue());
+            if ("RED".equals(trafficLightState) && bestMatch != null) {
+                // Logic: Bottom was above/at stop line, and now is beyond the violation zone
+                if (bestMatch.y <= stopLineY && currentBottomY > violationZone) {
+                    logger.info("Violation Detected: Vehicle bottom crossed stop line. Frame: {}, Y: {} -> {}", 
+                            frameNumber, (int)bestMatch.y, (int)currentBottomY);
                     
-                    // --- VISUALIZATION: RED BBOX AND LABEL ---
-                    DebugDrawingUtils.drawDetection(frame, vehicle, "RED LIGHT VIOLATION", new Scalar(0, 0, 255));
-
-                    recordViolation(frame, videoId, frameNumber, vehicle);
+                    processViolation(frame, vehicle, videoId, frameNumber);
                     violationsInFrame++;
-                    
-                    // Save violation frame for debug
-                    DebugDrawingUtils.saveDebugImage(frame, "violation_frame");
                 }
             }
         }
 
-        updateCentroids(videoId, vehicles);
+        updateBottomPoints(videoId, vehicles);
         return violationsInFrame;
+    }
+
+    private void drawStopLine(Mat frame, Double stopLineY) {
+        Imgproc.line(frame, new Point(0, stopLineY), new Point(frame.cols(), stopLineY), new Scalar(0, 255, 0), 2);
+    }
+
+    private void processViolation(Mat frame, Rect vehicle, Long videoId, int frameNumber) {
+        // Visual feedback on frame
+        DebugDrawingUtils.drawDetection(frame, vehicle, "RED LIGHT VIOLATION", new Scalar(0, 0, 255));
+        
+        // Record to DB and save image
+        recordViolation(frame, videoId, frameNumber, vehicle);
     }
 
     private Point findBestMatch(Point current, List<Point> previousList) {
         Point bestMatch = null;
-        double minDistance = 50; // Max pixels a vehicle can move between frames
+        double minDistance = 100; // Search radius for matching vehicle from previous frame
         for (Point prev : previousList) {
             double dist = Math.sqrt(Math.pow(current.x - prev.x, 2) + Math.pow(current.y - prev.y, 2));
             if (dist < minDistance) {
@@ -85,12 +98,12 @@ public class ViolationDetectionService {
         return bestMatch;
     }
 
-    private void updateCentroids(Long videoId, List<Rect> vehicles) {
-        List<Point> centroids = new ArrayList<>();
+    private void updateBottomPoints(Long videoId, List<Rect> vehicles) {
+        List<Point> bottomPoints = new ArrayList<>();
         for (Rect v : vehicles) {
-            centroids.add(new Point(v.x + v.width / 2.0, v.y + v.height / 2.0));
+            bottomPoints.add(new Point(v.x + v.width / 2.0, (double) v.y + v.height));
         }
-        previousFrameCentroids.put(videoId, centroids);
+        previousFrameBottomPoints.put(videoId, bottomPoints);
     }
 
     private void recordViolation(Mat frame, Long videoId, int frameNumber, Rect bbox) {
@@ -100,29 +113,45 @@ public class ViolationDetectionService {
             logger.error("Could not create violations directory", e);
         }
 
-        Mat cropped = new Mat(frame, bbox);
-        String filename = "violation_" + UUID.randomUUID().toString() + ".jpg";
-        String filePath = VIOLATIONS_DIR + "/" + filename;
-        Imgcodecs.imwrite(filePath, cropped);
-        cropped.release();
+        // PART 5: Avoid memory leaks with Mat objects
+        Mat cropped = null;
+        try {
+            // Ensure bbox is within frame boundaries to avoid crash
+            Rect safeBbox = getSafeBbox(frame, bbox);
+            cropped = new Mat(frame, safeBbox);
+            
+            String filename = "violation_" + UUID.randomUUID() + ".jpg";
+            String filePath = VIOLATIONS_DIR + "/" + filename;
+            Imgcodecs.imwrite(filePath, cropped);
 
-        TrafficEvent event = new TrafficEvent();
-        event.setVideoId(videoId);
-        event.setEventType("RED_LIGHT_VIOLATION");
-        event.setFrameNumber(frameNumber);
-        event.setTimestamp(LocalDateTime.now());
-        event.setBboxX(bbox.x);
-        event.setBboxY(bbox.y);
-        event.setBboxWidth(bbox.width);
-        event.setBboxHeight(bbox.height);
-        event.setCentroidX(bbox.x + bbox.width / 2.0);
-        event.setCentroidY(bbox.y + bbox.height / 2.0);
-        event.setImagePath("/violations/" + filename);
-        event.setDetails("Vehicle crossed stop line on red light.");
-        trafficEventRepository.save(event);
+            TrafficEvent event = new TrafficEvent();
+            event.setVideoId(videoId);
+            event.setEventType("RED_LIGHT_VIOLATION");
+            event.setFrameNumber(frameNumber);
+            event.setTimestamp(LocalDateTime.now());
+            event.setBboxX(safeBbox.x);
+            event.setBboxY(safeBbox.y);
+            event.setBboxWidth(safeBbox.width);
+            event.setBboxHeight(safeBbox.height);
+            event.setCentroidX(safeBbox.x + safeBbox.width / 2.0);
+            event.setCentroidY(safeBbox.y + safeBbox.height / 2.0);
+            event.setImagePath("/violations/" + filename);
+            event.setDetails("Vehicle crossed stop line on red light.");
+            trafficEventRepository.save(event);
+        } finally {
+            if (cropped != null) cropped.release();
+        }
+    }
+
+    private Rect getSafeBbox(Mat frame, Rect bbox) {
+        int x = Math.max(0, bbox.x);
+        int y = Math.max(0, bbox.y);
+        int width = Math.min(bbox.width, frame.cols() - x);
+        int height = Math.min(bbox.height, frame.rows() - y);
+        return new Rect(x, y, width, height);
     }
     
     public void clearHistory(Long videoId) {
-        previousFrameCentroids.remove(videoId);
+        previousFrameBottomPoints.remove(videoId);
     }
 }

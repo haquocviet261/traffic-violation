@@ -23,22 +23,9 @@ public class DebugDrawingUtils {
         }
     }
 
-    public static void drawROI(Mat frame, Rect roi, Scalar color, String label) {
-        Imgproc.rectangle(frame, roi.tl(), roi.br(), color, 2);
-        Imgproc.putText(frame, label, new Point(roi.x, roi.y - 5), Imgproc.FONT_HERSHEY_SIMPLEX, 0.5, color, 1);
-    }
-
     public static void drawDetection(Mat frame, Rect box, String label, Scalar color) {
         Imgproc.rectangle(frame, box.tl(), box.br(), color, 2);
         Imgproc.putText(frame, label, new Point(box.x, box.y - 5), Imgproc.FONT_HERSHEY_SIMPLEX, 0.6, color, 2);
-    }
-
-    public static void drawCentroid(Mat frame, Point centroid, Scalar color) {
-        Imgproc.circle(frame, centroid, 4, color, -1);
-    }
-
-    public static void drawLine(Mat frame, Point p1, Point p2, Scalar color, int thickness) {
-        Imgproc.line(frame, p1, p2, color, thickness);
     }
 
     public static void saveDebugImage(Mat frame, String prefix) {
