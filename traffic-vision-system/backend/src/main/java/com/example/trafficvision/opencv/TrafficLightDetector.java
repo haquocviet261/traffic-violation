@@ -35,18 +35,21 @@ public class TrafficLightDetector {
     private final Map<Long, LinkedList<String>> stateHistoryMap = new ConcurrentHashMap<>();
 
     /**
-     * Determines the traffic light state with temporal smoothing and flashing red handling.
+     * Xác định trạng thái đèn giao thông với cơ chế làm mượt theo thời gian và xử lý đèn đỏ nhấp nháy.
      */
     public String getTrafficLightState(Mat frame, Long videoId) {
 
         if (frame.empty()) return "UNKNOWN";
 
+        // ROI: Chỉ tập trung vào nửa trên của khung hình nơi đèn giao thông thường xuất hiện
         Rect roiRect = new Rect(0, 0, frame.cols(), (int) (frame.rows() * 0.5));
         Mat roi = frame.submat(roiRect);
 
+        // Chuyển sang không gian màu HSV để phân đoạn màu sắc tốt hơn dưới các điều kiện ánh sáng khác nhau
         Mat hsvFrame = new Mat();
         Imgproc.cvtColor(roi, hsvFrame, Imgproc.COLOR_BGR2HSV);
 
+        // Lấy thông tin contour lớn nhất cho từng màu (Đỏ, Xanh, Vàng)
         DetectionInfo red = getMaxContourInfo(hsvFrame, LOWER_RED1, UPPER_RED1, LOWER_RED2, UPPER_RED2);
         DetectionInfo green = getMaxContourInfo(hsvFrame, LOWER_GREEN, UPPER_GREEN, null, null);
         DetectionInfo yellow = getMaxContourInfo(hsvFrame, LOWER_YELLOW, UPPER_YELLOW, null, null);
@@ -54,6 +57,7 @@ public class TrafficLightDetector {
         String currentState = "UNKNOWN";
         DetectionInfo best = red;
 
+        // Logic so sánh diện tích contour để xác định màu đèn hiện tại (phải vượt ngưỡng diện tích tối thiểu)
         if (red.area >= MIN_TRAFFIC_LIGHT_AREA) {
             currentState = "RED";
         }
@@ -68,13 +72,18 @@ public class TrafficLightDetector {
             currentState = "YELLOW";
         }
 
+        // Cập nhật lịch sử trạng thái vào buffer để lọc nhiễu (Temporal Smoothing)
         updateStateHistory(videoId, currentState);
 
+        // Lấy trạng thái xuất hiện nhiều nhất trong buffer (Dominant State)
         String finalState = getDominantState(videoId);
 
+        // Xử lý đặc biệt cho đèn đỏ nhấp nháy (khi trạng thái xen kẽ giữa RED và UNKNOWN)
         if (isFlashingRed(videoId)) {
             finalState = "RED";
         }
+
+        // Vẽ box debug lên frame
         Imgproc.rectangle(frame, best.box, new Scalar(0, 0, 255), 2);
         Imgproc.putText(frame, currentState, new Point(best.box.x, best.box.y - 5),
                 Imgproc.FONT_HERSHEY_SIMPLEX, 0.5, new Scalar(0, 0, 255), 2);
@@ -176,7 +185,80 @@ public class TrafficLightDetector {
     }
 
     public List<Rect> detectTrafficLights(Mat frame) {
-        return new ArrayList<>();
+
+        List<Rect> trafficLights = new ArrayList<>();
+
+        if (frame.empty()) return trafficLights;
+
+        // 1. Chỉ lấy vùng phía trên (đèn giao thông luôn nằm trên cao)
+        Rect roiRect = new Rect(0, 0, frame.cols(), (int) (frame.rows() * 0.5));
+        Mat roi = frame.submat(roiRect);
+
+        // 2. Chuyển sang HSV
+        Mat hsv = new Mat();
+        Imgproc.cvtColor(roi, hsv, Imgproc.COLOR_BGR2HSV);
+
+        // 3. Mask màu đỏ (2 vùng đỏ trong HSV)
+        Mat mask1 = new Mat();
+        Mat mask2 = new Mat();
+        Core.inRange(hsv, LOWER_RED1, UPPER_RED1, mask1);
+        Core.inRange(hsv, LOWER_RED2, UPPER_RED2, mask2);
+
+        Mat redMask = new Mat();
+        Core.bitwise_or(mask1, mask2, redMask);
+
+        // 4. Giảm nhiễu
+        Imgproc.GaussianBlur(redMask, redMask, new Size(5, 5), 0);
+        Imgproc.morphologyEx(redMask, redMask, Imgproc.MORPH_CLOSE,
+                Imgproc.getStructuringElement(Imgproc.MORPH_RECT, new Size(5, 5)));
+
+        // 5. Tìm contour
+        List<MatOfPoint> contours = new ArrayList<>();
+        Mat hierarchy = new Mat();
+
+        Imgproc.findContours(redMask, contours, hierarchy,
+                Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE);
+
+        // 6. Lọc contour để chỉ giữ đèn giao thông thật
+        for (MatOfPoint contour : contours) {
+
+            double area = Imgproc.contourArea(contour);
+
+            // Lọc diện tích (loại nhiễu nhỏ + biển quảng cáo lớn)
+            if (area < 60 || area > 1500) continue;
+
+            Rect box = Imgproc.boundingRect(contour);
+
+            // Hình gần tròn
+            double perimeter = Imgproc.arcLength(new MatOfPoint2f(contour.toArray()), true);
+            double circularity = 4 * Math.PI * area / (perimeter * perimeter);
+            if (circularity < 0.5) continue;
+
+            // Bounding box gần vuông
+            double ratio = (double) box.width / box.height;
+            if (ratio < 0.7 || ratio > 1.3) continue;
+
+            // Không quá to (biển quảng cáo sẽ bị loại)
+            if (box.width > 80 || box.height > 80) continue;
+
+            // Phải nằm phía trên frame
+            if (box.y > roi.rows() * 0.8) continue;
+
+            trafficLights.add(box);
+
+            // Debug box
+            Imgproc.rectangle(frame, box, new Scalar(0, 0, 255), 2);
+        }
+
+        // 7. Giải phóng bộ nhớ
+        hsv.release();
+        mask1.release();
+        mask2.release();
+        redMask.release();
+        hierarchy.release();
+        roi.release();
+
+        return trafficLights;
     }
 
     private static class DetectionInfo {

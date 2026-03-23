@@ -92,18 +92,6 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         onFrameUpdate(currentFrameNumber);
       }
 
-      // 1. Draw Stop Lines
-      if (analysisResults.stopLines) {
-        analysisResults.stopLines.forEach((line) => {
-          ctx.beginPath();
-          ctx.moveTo(line.x1, line.y1);
-          ctx.lineTo(line.x2, line.y2);
-          ctx.lineWidth = 3;
-          ctx.strokeStyle = 'lime';
-          ctx.stroke();
-        });
-      }
-
       // 2. Draw Vehicle Violations
       if (analysisResults.trafficEvents) {
         const eventsInFrame = analysisResults.trafficEvents.filter(

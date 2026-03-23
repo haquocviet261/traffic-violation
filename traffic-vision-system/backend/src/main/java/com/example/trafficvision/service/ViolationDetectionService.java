@@ -1,9 +1,12 @@
 package com.example.trafficvision.service;
 
 import com.example.trafficvision.model.TrafficEvent;
-import com.example.trafficvision.repository.TrafficEventRepository;
 import com.example.trafficvision.opencv.DebugDrawingUtils;
-import org.opencv.core.*;
+import com.example.trafficvision.repository.TrafficEventRepository;
+import org.opencv.core.Mat;
+import org.opencv.core.Point;
+import org.opencv.core.Rect;
+import org.opencv.core.Scalar;
 import org.opencv.imgcodecs.Imgcodecs;
 import org.opencv.imgproc.Imgproc;
 import org.slf4j.Logger;
@@ -24,51 +27,55 @@ import java.util.concurrent.ConcurrentHashMap;
 @Service
 public class ViolationDetectionService {
     private static final Logger logger = LoggerFactory.getLogger(ViolationDetectionService.class);
-
+    private final String VIOLATIONS_DIR = "violations";
+    // Tracks vehicle bottom-center points across frames for motion analysis
+    private final Map<Long, List<Point>> previousFrameBottomPoints = new ConcurrentHashMap<>();
     @Autowired
     private TrafficEventRepository trafficEventRepository;
 
-    private final String VIOLATIONS_DIR = "violations";
-
-    // Tracks vehicle bottom-center points across frames for motion analysis
-    private final Map<Long, List<Point>> previousFrameBottomPoints = new ConcurrentHashMap<>();
-
     /**
      * PART 4: RED LIGHT VIOLATION DETECTION
-     * Detects violations based on bottom of vehicle crossing the stop line during a RED light.
+     * Phát hiện vi phạm dựa trên việc phần đáy của xe (tiếp giáp mặt đường) vượt qua vạch dừng khi đèn đang ĐỎ.
      */
     public int detectViolations(Mat frame, List<Rect> vehicles, Double stopLineY, String trafficLightState, Long videoId, int frameNumber) {
+        // Nếu không phát hiện được vạch dừng hoặc không có xe, bỏ qua kiểm tra
         if (stopLineY == null || vehicles.isEmpty()) {
             updateBottomPoints(videoId, vehicles);
             return 0;
         }
 
-        // Visualize stop line
+        // Vẽ vạch dừng lên frame để làm bằng chứng trực quan
         drawStopLine(frame, stopLineY);
 
         List<Point> prevBottomPoints = previousFrameBottomPoints.getOrDefault(videoId, new ArrayList<>());
         int violationsInFrame = 0;
-        
-        // Tolerance zone to avoid false violations (vehicle stops slightly over the line)
+
+        // Vùng dung sai (10 pixel) để tránh báo lỗi giả khi xe chỉ hơi nhô qua vạch dừng một chút
         double violationZone = stopLineY + 10;
 
         for (Rect vehicle : vehicles) {
+            // Sử dụng tọa độ Y của đáy bounding box (vị trí bánh xe tiếp đất) thay vì tâm (centroid)
             double currentBottomY = (double) vehicle.y + vehicle.height;
             Point currentBottomPoint = new Point(vehicle.x + vehicle.width / 2.0, currentBottomY);
+
+            // Tìm xe tương ứng từ frame trước dựa trên khoảng cách Euclid ngắn nhất
             Point bestMatch = findBestMatch(currentBottomPoint, prevBottomPoints);
 
+            // Kiểm tra vi phạm: Đèn đỏ VÀ xe đã khớp từ frame trước VÀ đã vượt qua vạch dừng
             if ("RED".equals(trafficLightState) && bestMatch != null) {
-                // Logic: Bottom was above/at stop line, and now is beyond the violation zone
+                // Logic: Frame trước đáy xe vẫn ở TRÊN hoặc NGANG vạch dừng, frame này đáy xe đã vượt qua VÙNG DUNG SAI
                 if (bestMatch.y <= stopLineY && currentBottomY > violationZone) {
-                    logger.info("Violation Detected: Vehicle bottom crossed stop line. Frame: {}, Y: {} -> {}", 
-                            frameNumber, (int)bestMatch.y, (int)currentBottomY);
-                    
+                    logger.info("Violation Detected: Vehicle bottom crossed stop line. Frame: {}, Y: {} -> {}",
+                            frameNumber, (int) bestMatch.y, (int) currentBottomY);
+
+                    // Xử lý ghi nhận vi phạm: vẽ lên frame, lưu ảnh và lưu database
                     processViolation(frame, vehicle, videoId, frameNumber);
                     violationsInFrame++;
                 }
             }
         }
 
+        // Cập nhật danh sách điểm đáy xe cho frame tiếp theo
         updateBottomPoints(videoId, vehicles);
         return violationsInFrame;
     }
@@ -80,7 +87,7 @@ public class ViolationDetectionService {
     private void processViolation(Mat frame, Rect vehicle, Long videoId, int frameNumber) {
         // Visual feedback on frame
         DebugDrawingUtils.drawDetection(frame, vehicle, "RED LIGHT VIOLATION", new Scalar(0, 0, 255));
-        
+
         // Record to DB and save image
         recordViolation(frame, videoId, frameNumber, vehicle);
     }
@@ -119,7 +126,7 @@ public class ViolationDetectionService {
             // Ensure bbox is within frame boundaries to avoid crash
             Rect safeBbox = getSafeBbox(frame, bbox);
             cropped = new Mat(frame, safeBbox);
-            
+
             String filename = "violation_" + UUID.randomUUID() + ".jpg";
             String filePath = VIOLATIONS_DIR + "/" + filename;
             Imgcodecs.imwrite(filePath, cropped);
@@ -150,7 +157,7 @@ public class ViolationDetectionService {
         int height = Math.min(bbox.height, frame.rows() - y);
         return new Rect(x, y, width, height);
     }
-    
+
     public void clearHistory(Long videoId) {
         previousFrameBottomPoints.remove(videoId);
     }

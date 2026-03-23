@@ -19,6 +19,10 @@ import org.springframework.web.multipart.MultipartFile;
 import java.io.IOException;
 import java.nio.file.Path;
 
+/**
+ * VideoController cung cấp các API RESTful để quản lý việc tải video,
+ * theo dõi trạng thái xử lý, xem kết quả phân tích và phát video trực tuyến (streaming).
+ */
 @RestController
 @RequestMapping("/api/videos")
 public class VideoController {
@@ -29,13 +33,21 @@ public class VideoController {
     @Autowired
     private DashboardService dashboardService;
 
+    /**
+     * Tải video lên hệ thống và bắt đầu quy trình xử lý không đồng bộ.
+     *
+     * @param file Tệp video được tải lên từ client
+     * @return ID của video để client theo dõi
+     */
     @PostMapping("/upload")
     public ResponseEntity<UploadResponse> uploadVideo(@RequestParam("file") MultipartFile file) {
         if (file.isEmpty()) {
             return new ResponseEntity<>(new UploadResponse("No file uploaded", null), HttpStatus.BAD_REQUEST);
         }
         try {
+            // Lưu video vào thư mục uploads
             Video video = videoProcessingService.uploadVideo(file);
+            // Kích hoạt xử lý video bằng OpenCV ở luồng nền (Async)
             videoProcessingService.processVideoAsync(video.getId());
             return new ResponseEntity<>(new UploadResponse("Video uploaded successfully", video.getId()), HttpStatus.OK);
         } catch (Exception e) {
@@ -44,6 +56,9 @@ public class VideoController {
         }
     }
 
+    /**
+     * Kiểm tra trạng thái xử lý của video (UPLOADED, PROCESSING, COMPLETED, FAILED).
+     */
     @GetMapping("/{id}/status")
     public ResponseEntity<String> getVideoStatus(@PathVariable Long id) {
         String status = videoProcessingService.getVideoStatus(id);
@@ -53,6 +68,9 @@ public class VideoController {
         return new ResponseEntity<>("Video not found or status not available", HttpStatus.NOT_FOUND);
     }
 
+    /**
+     * Lấy kết quả phân tích chi tiết của video (số xe, số lỗi vi phạm, mật độ...).
+     */
     @GetMapping("/{id}/analysis")
     public ResponseEntity<AnalysisResponse> getAnalysisResults(@PathVariable Long id) {
         AnalysisResponse analysisResponse = videoProcessingService.getAnalysisResults(id);
@@ -62,6 +80,10 @@ public class VideoController {
         return new ResponseEntity<>(HttpStatus.NOT_FOUND);
     }
 
+    /**
+     * API hỗ trợ phát video trực tuyến (streaming) theo từng phần (Range requests).
+     * Cho phép trình duyệt xem video mượt mà và tua nhanh mà không cần tải toàn bộ tệp.
+     */
     @GetMapping("/{id}")
     public ResponseEntity<ResourceRegion> streamVideo(@PathVariable Long id, @RequestHeader HttpHeaders headers) throws IOException {
         Path videoPath = videoProcessingService.getVideoFilePath(id);
@@ -81,6 +103,9 @@ public class VideoController {
                 .body(region);
     }
 
+    /**
+     * Chia nhỏ tệp video thành các vùng dữ liệu (ResourceRegion) để phục vụ streaming.
+     */
     private ResourceRegion resourceRegion(Resource video, HttpHeaders headers) throws IOException {
         long contentLength = video.contentLength();
         HttpRange range = headers.getRange().isEmpty() ? null : headers.getRange().get(0);
@@ -88,16 +113,20 @@ public class VideoController {
         if (range != null) {
             long start = range.getRangeStart(contentLength);
             long end = range.getRangeEnd(contentLength);
-            long rangeLength = Math.min(5 * 1024 * 1024L, end - start + 1); // Increased to 5MB chunks
+            // Phục vụ theo từng khối 5MB
+            long rangeLength = Math.min(5 * 1024 * 1024L, end - start + 1);
             logger.debug("Serving range: {}-{}, length: {}", start, start + rangeLength - 1, rangeLength);
             return new ResourceRegion(video, start, rangeLength);
         } else {
-            long rangeLength = Math.min(5 * 1024 * 1024L, contentLength); // Serve first 5MB
+            long rangeLength = Math.min(5 * 1024 * 1024L, contentLength);
             logger.debug("No range requested, serving first {} bytes", rangeLength);
             return new ResourceRegion(video, 0, rangeLength);
         }
     }
 
+    /**
+     * Lấy URL để truy cập tệp video đã xử lý (có vẽ các khung nhận diện).
+     */
     @GetMapping("/{id}/processed-video")
     public ResponseEntity<String> getProcessedVideo(@PathVariable Long id) {
         String processedVideoUrl = videoProcessingService.getProcessedVideoUrl(id);
@@ -107,6 +136,9 @@ public class VideoController {
         return new ResponseEntity<>("Processed video not found", HttpStatus.NOT_FOUND);
     }
 
+    /**
+     * Lấy dữ liệu thống kê tổng quát cho dashboard.
+     */
     @GetMapping("/dashboard-stats")
     public ResponseEntity<DashboardStatsResponse> getDashboardStats() {
         DashboardStatsResponse stats = dashboardService.getDashboardStatistics();

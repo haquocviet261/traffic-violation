@@ -39,6 +39,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
+/**
+ * Dịch vụ VideoProcessingService xử lý toàn bộ quy trình từ tải lên video,
+ * phân tích video không đồng bộ bằng OpenCV và lưu trữ kết quả phân tích.
+ */
 @Service
 public class VideoProcessingService {
     private static final Logger logger = LoggerFactory.getLogger(VideoProcessingService.class);
@@ -60,10 +64,14 @@ public class VideoProcessingService {
     @Autowired
     private ObjectMapper objectMapper;
 
+    // ExecutorService để xử lý video ở luồng nền, tránh làm treo ứng dụng
     private final ExecutorService executorService = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
 
     private final String UPLOAD_DIR = "uploads";
 
+    /**
+     * Tải video lên và lưu thông tin vào cơ sở dữ liệu.
+     */
     public Video uploadVideo(MultipartFile file) throws IOException {
         Path uploadPath = Paths.get(UPLOAD_DIR);
         if (!Files.exists(uploadPath)) {
@@ -75,6 +83,7 @@ public class VideoProcessingService {
         if (originalFilename != null && originalFilename.contains(".")) {
             fileExtension = originalFilename.substring(originalFilename.lastIndexOf("."));
         }
+        // Tạo tên tệp duy nhất bằng UUID để tránh trùng lặp
         String filename = UUID.randomUUID() + fileExtension;
         Path filePath = uploadPath.resolve(filename);
 
@@ -87,6 +96,9 @@ public class VideoProcessingService {
         return videoRepository.save(video);
     }
 
+    /**
+     * Kích hoạt quy trình xử lý video không đồng bộ.
+     */
     public void processVideoAsync(Long videoId) {
         executorService.submit(() -> {
             try {
@@ -101,6 +113,9 @@ public class VideoProcessingService {
         });
     }
 
+    /**
+     * Quy trình xử lý video chính sử dụng OpenCV.
+     */
     private void processVideo(Long videoId) {
         Optional<com.example.trafficvision.model.Video> videoOptional = videoRepository.findById(videoId);
         if (videoOptional.isEmpty()) {
@@ -124,6 +139,7 @@ public class VideoProcessingService {
             return;
         }
 
+        // Đọc thông tin video: FPS, chiều rộng, chiều cao
         double fps = cap.get(Videoio.CAP_PROP_FPS);
         if (fps <= 0) fps = 30.0;
         int width = (int) cap.get(Videoio.CAP_PROP_FRAME_WIDTH);
@@ -131,6 +147,7 @@ public class VideoProcessingService {
         String processedFilename = "processed_" + video.getFilename();
         String outputPath = Paths.get(UPLOAD_DIR, processedFilename).toAbsolutePath().toString();
         
+        // Khởi tạo VideoWriter để ghi lại video đã xử lý (có vẽ các khung phát hiện)
         int fourcc = VideoWriter.fourcc('a', 'v', 'c', '1');
         VideoWriter writer = new VideoWriter(outputPath, fourcc, fps, new Size(width, height));
 
@@ -139,6 +156,8 @@ public class VideoProcessingService {
             fourcc = VideoWriter.fourcc('m', 'p', '4', 'v');
             writer = new VideoWriter(outputPath, fourcc, fps, new Size(width, height));
         }
+
+        // ExecutorService riêng biệt để xử lý song song các tác vụ trong từng khung hình (phát hiện xe, vạch dừng, đèn giao thông)
         ExecutorService frameExecutor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
 
         Mat frame = new Mat();
@@ -154,12 +173,12 @@ public class VideoProcessingService {
             while (cap.read(frame)) {
                 if (frame.empty()) break;
 
-                // Clone frame để tránh conflict giữa các thread
+                // Clone frame để tránh xung đột dữ liệu khi xử lý đa luồng
                 Mat vehicleFrame = frame.clone();
                 Mat stopLineFrame = frame.clone();
                 Mat lightFrame = frame.clone();
 
-                // ---- Run parallel tasks ----
+                // ---- Chạy các tác vụ phát hiện song song ----
                 Future<List<Rect>> vehicleFuture = frameExecutor.submit(() ->
                         vehicleDetectionService.detectVehicles(vehicleFrame)
                 );
@@ -172,7 +191,7 @@ public class VideoProcessingService {
                         trafficLightDetector.getTrafficLightState(lightFrame, videoId)
                 );
 
-                // ---- Get results ----
+                // ---- Thu thập kết quả từ các luồng ----
                 List<Rect> vehicleRects = vehicleFuture.get();
                 Double stopLineY = stopLineFuture.get();
                 currentTrafficLightState = lightFuture.get();
@@ -180,7 +199,7 @@ public class VideoProcessingService {
                 if (stopLineY != null) totalStopLinesDetected++;
                 totalVehicleDetections += vehicleRects.size();
 
-                // ---- Detect traffic light rectangles mỗi 30 frame ----
+                // ---- Phát hiện vị trí đèn giao thông mỗi 30 khung hình để tối ưu hiệu năng ----
                 if (frameCount % 30 == 0) {
                     List<Rect> trafficLightRects = trafficLightDetector.detectTrafficLights(frame);
                     mergeUniqueLights(trafficLightRects, uniqueTrafficLights);
@@ -200,7 +219,7 @@ public class VideoProcessingService {
                     );
                 }
 
-                // ---- Violation detection ----
+                // ---- Kiểm tra vi phạm giao thông dựa trên trạng thái đèn và vị trí xe ----
                 totalViolationCount += violationDetectionService.detectViolations(
                         frame,
                         vehicleRects,
@@ -210,7 +229,7 @@ public class VideoProcessingService {
                         frameCount
                 );
 
-                // ---- Write frame ----
+                // ---- Ghi khung hình đã xử lý vào tệp đầu ra ----
                 if (writer.isOpened()) {
                     writer.write(frame);
                 }
@@ -218,7 +237,7 @@ public class VideoProcessingService {
                 frameCount++;
             }
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt(); // rất quan trọng
+            Thread.currentThread().interrupt();
             logger.error("Thread interrupted while processing video {}", videoId, e);
 
         } catch (ExecutionException e) {
@@ -231,8 +250,10 @@ public class VideoProcessingService {
             frame.release();
         }
 
+        // Tính toán mật độ giao thông trung bình
         double trafficDensity = frameCount > 0 ? (double) totalVehicleDetections / frameCount : 0.0;
 
+        // Lưu kết quả phân tích tổng hợp vào DB
         AnalysisResult result = new AnalysisResult();
         result.setVideoId(videoId);
         result.setVehicleCount(totalVehicleDetections);
@@ -242,6 +263,7 @@ public class VideoProcessingService {
         result.setTrafficLightDetections(uniqueTrafficLights.size());
         result.setStopLinesDetected(totalStopLinesDetected);
 
+        // Serialize các thông tin tọa độ để lưu trữ dưới dạng JSON trong DB
         if (lastDetectionResult != null) {
             try {
                 List<RectDto> trafficLightRectDtos = lastDetectionResult.getTrafficLightRects().stream()
@@ -259,6 +281,7 @@ public class VideoProcessingService {
         }
         analysisResultRepository.save(result);
 
+        // Cập nhật trạng thái video hoàn tất và dọn dẹp bộ nhớ đệm
         video.setStatus("COMPLETED");
         videoRepository.save(video);
         violationDetectionService.clearHistory(videoId);
@@ -269,10 +292,16 @@ public class VideoProcessingService {
         logger.info("Total violations detected: {}", totalViolationCount);
     }
 
+    /**
+     * Lấy trạng thái hiện tại của quy trình xử lý video.
+     */
     public String getVideoStatus(Long id) {
         return videoRepository.findById(id).map(com.example.trafficvision.model.Video::getStatus).orElse(null);
     }
 
+    /**
+     * Lấy kết quả phân tích chi tiết của video.
+     */
     public AnalysisResponse getAnalysisResults(Long id) {
         return analysisResultRepository.findByVideoId(id)
                 .map(ar -> {
@@ -294,6 +323,9 @@ public class VideoProcessingService {
                 .orElse(null);
     }
 
+    /**
+     * Lấy URL để truy cập video đã xử lý.
+     */
     public String getProcessedVideoUrl(Long id) {
         Optional<com.example.trafficvision.model.Video> videoOptional = videoRepository.findById(id);
         if (videoOptional.isPresent() && "COMPLETED".equals(videoOptional.get().getStatus())) {
@@ -302,6 +334,9 @@ public class VideoProcessingService {
         return null;
     }
 
+    /**
+     * Lấy đường dẫn tệp video (ưu tiên video đã xử lý nếu có).
+     */
     public Path getVideoFilePath(Long id) {
         return videoRepository.findById(id)
                 .map(v -> {
@@ -314,6 +349,9 @@ public class VideoProcessingService {
                 .orElse(null);
     }
 
+    /**
+     * Hợp nhất các đèn giao thông phát hiện được, loại bỏ các vùng trùng lặp gần nhau.
+     */
     private void mergeUniqueLights(List<Rect> newLights, List<Rect> uniqueLights) {
         for (Rect newLight : newLights) {
             boolean found = false;
