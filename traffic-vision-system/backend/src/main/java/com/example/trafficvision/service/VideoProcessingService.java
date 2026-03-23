@@ -34,7 +34,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -46,7 +45,9 @@ import java.util.concurrent.Future;
 @Service
 public class VideoProcessingService {
     private static final Logger logger = LoggerFactory.getLogger(VideoProcessingService.class);
-
+    // ExecutorService để xử lý video ở luồng nền, tránh làm treo ứng dụng
+    private final ExecutorService executorService = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+    private final String UPLOAD_DIR = "uploads";
     @Autowired
     private VideoRepository videoRepository;
     @Autowired
@@ -63,11 +64,6 @@ public class VideoProcessingService {
     private ViolationDetectionService violationDetectionService;
     @Autowired
     private ObjectMapper objectMapper;
-
-    // ExecutorService để xử lý video ở luồng nền, tránh làm treo ứng dụng
-    private final ExecutorService executorService = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
-
-    private final String UPLOAD_DIR = "uploads";
 
     /**
      * Tải video lên và lưu thông tin vào cơ sở dữ liệu.
@@ -119,7 +115,7 @@ public class VideoProcessingService {
     private void processVideo(Long videoId) {
         Optional<com.example.trafficvision.model.Video> videoOptional = videoRepository.findById(videoId);
         if (videoOptional.isEmpty()) {
-            logger.error("Video with ID {} not found for processing.", videoId);
+            logger.error("Video with ID {} not found.", videoId);
             return;
         }
 
@@ -127,176 +123,137 @@ public class VideoProcessingService {
         video.setStatus("PROCESSING");
         videoRepository.save(video);
 
-        logger.info("Starting OpenCV processing for video: {}", video.getFilename());
-
-        String videoFilePath = Paths.get(UPLOAD_DIR, video.getFilename()).toAbsolutePath().toString();
-        VideoCapture cap = new VideoCapture(videoFilePath);
+        String videoPath = Paths.get(UPLOAD_DIR, video.getFilename()).toAbsolutePath().toString();
+        VideoCapture cap = new VideoCapture(videoPath);
 
         if (!cap.isOpened()) {
-            logger.error("Error: Could not open video file: {}", videoFilePath);
             video.setStatus("FAILED");
             videoRepository.save(video);
             return;
         }
 
-        // Đọc thông tin video: FPS, chiều rộng, chiều cao
-        double fps = cap.get(Videoio.CAP_PROP_FPS);
-        if (fps <= 0) fps = 30.0;
+        double fps = cap.get(Videoio.CAP_PROP_FPS) > 0 ? cap.get(Videoio.CAP_PROP_FPS) : 30.0;
         int width = (int) cap.get(Videoio.CAP_PROP_FRAME_WIDTH);
         int height = (int) cap.get(Videoio.CAP_PROP_FRAME_HEIGHT);
-        String processedFilename = "processed_" + video.getFilename();
-        String outputPath = Paths.get(UPLOAD_DIR, processedFilename).toAbsolutePath().toString();
-        
-        // Khởi tạo VideoWriter để ghi lại video đã xử lý (có vẽ các khung phát hiện)
-        int fourcc = VideoWriter.fourcc('a', 'v', 'c', '1');
-        VideoWriter writer = new VideoWriter(outputPath, fourcc, fps, new Size(width, height));
+        String outputPath = Paths.get(UPLOAD_DIR, "processed_" + video.getFilename()).toAbsolutePath().toString();
 
+        VideoWriter writer = new VideoWriter(outputPath, VideoWriter.fourcc('a', 'v', 'c', '1'), fps, new Size(width, height));
         if (!writer.isOpened()) {
-            logger.warn("Could not open VideoWriter with H264 (avc1), falling back to MP4V");
-            fourcc = VideoWriter.fourcc('m', 'p', '4', 'v');
-            writer = new VideoWriter(outputPath, fourcc, fps, new Size(width, height));
+            writer = new VideoWriter(outputPath, VideoWriter.fourcc('m', 'p', '4', 'v'), fps, new Size(width, height));
         }
 
-        // ExecutorService riêng biệt để xử lý song song các tác vụ trong từng khung hình (phát hiện xe, vạch dừng, đèn giao thông)
-        ExecutorService frameExecutor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+        // Pool dùng chung cho các tác vụ trong frame
+        ExecutorService frameExecutor = Executors.newFixedThreadPool(3);
 
         Mat frame = new Mat();
-        int totalVehicleDetections = 0;
-        int totalStopLinesDetected = 0;
-        int totalViolationCount = 0;
+        int totalVehicles = 0;
+        int totalViolations = 0;
         int frameCount = 0;
-        DetectionResult lastDetectionResult = null;
-        String currentTrafficLightState = "UNKNOWN";
-        List<Rect> uniqueTrafficLights = new ArrayList<>();
+
+        // Biến lưu trữ trạng thái để dùng giữa các frame
+        Double stableStopLineY = null;
+        String currentLightState = "UNKNOWN";
+        List<Rect> uniqueLights = new ArrayList<>();
+        DetectionResult lastResult = null;
 
         try {
             while (cap.read(frame)) {
                 if (frame.empty()) break;
 
-                // Clone frame để tránh xung đột dữ liệu khi xử lý đa luồng
-                Mat vehicleFrame = frame.clone();
-                Mat stopLineFrame = frame.clone();
-                Mat lightFrame = frame.clone();
+                final Mat currentFrame = frame.clone();
 
-                // ---- Chạy các tác vụ phát hiện song song ----
+                // 2. CHẠY SONG SONG CÁC TÁC VỤ PHÁT HIỆN
+                // Tác vụ 1: Phát hiện phương tiện (luôn chạy)
                 Future<List<Rect>> vehicleFuture = frameExecutor.submit(() ->
-                        vehicleDetectionService.detectVehicles(vehicleFrame)
-                );
+                        vehicleDetectionService.detectVehicles(currentFrame));
 
-                Future<Double> stopLineFuture = frameExecutor.submit(() ->
-                        stopLineDetector.detectStopLineY(stopLineFrame, videoId)
-                );
-
+                // Tác vụ 2: Trạng thái đèn (luôn chạy)
                 Future<String> lightFuture = frameExecutor.submit(() ->
-                        trafficLightDetector.getTrafficLightState(lightFrame, videoId)
-                );
+                        trafficLightDetector.getTrafficLightState(currentFrame, videoId));
 
-                // ---- Thu thập kết quả từ các luồng ----
+                // Tác vụ 3: Vạch dừng (Chỉ tính lại mỗi 20 frame để giảm tải CPU và tránh nhiễu)
+                Future<Double> stopLineFuture = null;
+                if (frameCount < 20 || frameCount % 20 == 0 || stableStopLineY == null) {
+                    stopLineFuture = frameExecutor.submit(() ->
+                            stopLineDetector.detectStopLineY(currentFrame, videoId));
+                }
+
+                // 3. THU THẬP KẾT QUẢ
                 List<Rect> vehicleRects = vehicleFuture.get();
-                Double stopLineY = stopLineFuture.get();
-                currentTrafficLightState = lightFuture.get();
+                currentLightState = lightFuture.get();
 
-                if (stopLineY != null) totalStopLinesDetected++;
-                totalVehicleDetections += vehicleRects.size();
+                if (stopLineFuture != null) {
+                    Double detectedY = stopLineFuture.get();
+                    if (detectedY != null) stableStopLineY = detectedY;
+                }
 
-                // ---- Phát hiện vị trí đèn giao thông mỗi 30 khung hình để tối ưu hiệu năng ----
-                if (frameCount % 30 == 0) {
-                    List<Rect> trafficLightRects = trafficLightDetector.detectTrafficLights(frame);
-                    mergeUniqueLights(trafficLightRects, uniqueTrafficLights);
-
-                    List<org.opencv.core.Point[]> stopLinePoints = new ArrayList<>();
-                    if (stopLineY != null) {
-                        stopLinePoints.add(new org.opencv.core.Point[]{
-                                new org.opencv.core.Point(0, stopLineY),
-                                new org.opencv.core.Point(frame.cols(), stopLineY)
-                        });
-                    }
-
-                    lastDetectionResult = new DetectionResult(
-                            trafficLightRects,
-                            stopLinePoints,
-                            vehicleRects
+                // 4. LOGIC PHÁT HIỆN VI PHẠM & CẬP NHẬT THỐNG KÊ
+                if (stableStopLineY != null) {
+                    totalViolations += violationDetectionService.detectViolations(
+                            frame, vehicleRects, stableStopLineY, currentLightState, videoId, frameCount
                     );
                 }
+                totalVehicles += vehicleRects.size();
 
-                // ---- Kiểm tra vi phạm giao thông dựa trên trạng thái đèn và vị trí xe ----
-                totalViolationCount += violationDetectionService.detectViolations(
-                        frame,
-                        vehicleRects,
-                        stopLineY,
-                        currentTrafficLightState,
-                        videoId,
-                        frameCount
-                );
+                // 5. CẬP NHẬT DỮ LIỆU ĐỊNH KỲ (Để lưu vào DB sau này)
+                if (frameCount % 20 == 0) {
+                    List<Rect> lightRects = trafficLightDetector.detectTrafficLights(frame);
+                    mergeUniqueLights(lightRects, uniqueLights);
 
-                // ---- Ghi khung hình đã xử lý vào tệp đầu ra ----
-                if (writer.isOpened()) {
-                    writer.write(frame);
+                    List<org.opencv.core.Point[]> stopLines = new ArrayList<>();
+                    if (stableStopLineY != null) {
+                        stopLines.add(new org.opencv.core.Point[]{
+                                new org.opencv.core.Point(0, stableStopLineY),
+                                new org.opencv.core.Point(width, stableStopLineY)
+                        });
+                    }
+                    lastResult = new DetectionResult(lightRects, stopLines, vehicleRects);
                 }
 
+                // 6. GHI VIDEO & GIẢI PHÓNG BỘ NHỚ
+                if (writer.isOpened()) writer.write(frame);
+                currentFrame.release();
                 frameCount++;
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            logger.error("Thread interrupted while processing video {}", videoId, e);
-
-        } catch (ExecutionException e) {
-            logger.error("Error in async detection thread for video {}", videoId, e);
-        }
-        finally {
-            frameExecutor.shutdown();
+        } catch (Exception e) {
+            logger.error("Error processing video ID {}: {}", videoId, e.getMessage());
+        } finally {
+            // Dọn dẹp tài nguyên
+            frameExecutor.shutdownNow();
             cap.release();
             if (writer.isOpened()) writer.release();
             frame.release();
+            saveAnalysisResult(videoId, totalVehicles, totalViolations, frameCount, uniqueLights.size(), lastResult);
+
+            video.setStatus("COMPLETED");
+            videoRepository.save(video);
+            violationDetectionService.clearHistory(videoId);
+            stopLineDetector.clearHistory(videoId);
         }
-
-        // Tính toán mật độ giao thông trung bình
-        double trafficDensity = frameCount > 0 ? (double) totalVehicleDetections / frameCount : 0.0;
-
-        // Lưu kết quả phân tích tổng hợp vào DB
-        AnalysisResult result = new AnalysisResult();
-        result.setVideoId(videoId);
-        result.setVehicleCount(totalVehicleDetections);
-        result.setViolationCount(totalViolationCount);
-        result.setTrafficDensity(trafficDensity);
-        result.setCreatedAt(LocalDateTime.now());
-        result.setTrafficLightDetections(uniqueTrafficLights.size());
-        result.setStopLinesDetected(totalStopLinesDetected);
-
-        // Serialize các thông tin tọa độ để lưu trữ dưới dạng JSON trong DB
-        if (lastDetectionResult != null) {
-            try {
-                List<RectDto> trafficLightRectDtos = lastDetectionResult.getTrafficLightRects().stream()
-                        .map(rect -> new RectDto(rect.x, rect.y, rect.width, rect.height))
-                        .collect(java.util.stream.Collectors.toList());
-                result.setSerializedTrafficLightRects(objectMapper.writeValueAsString(trafficLightRectDtos));
-
-                List<LineDto> stopLineDtos = lastDetectionResult.getStopLines().stream()
-                        .map(line -> new LineDto(line[0].x, line[0].y, line[1].x, line[1].y))
-                        .collect(java.util.stream.Collectors.toList());
-                result.setSerializedStopLines(objectMapper.writeValueAsString(stopLineDtos));
-            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-                logger.error("Error serializing RectDto/LineDto: {}", e.getMessage());
-            }
-        }
-        analysisResultRepository.save(result);
-
-        // Cập nhật trạng thái video hoàn tất và dọn dẹp bộ nhớ đệm
-        video.setStatus("COMPLETED");
-        videoRepository.save(video);
-        violationDetectionService.clearHistory(videoId);
-        stopLineDetector.clearHistory(videoId);
-        trafficLightDetector.clearHistory(videoId);
-
-        logger.info("Finished OpenCV processing for video: {}", video.getFilename());
-        logger.info("Total violations detected: {}", totalViolationCount);
     }
 
     /**
-     * Lấy trạng thái hiện tại của quy trình xử lý video.
+     * Hàm hỗ trợ tách biệt phần lưu DB cho sạch code
      */
-    public String getVideoStatus(Long id) {
-        return videoRepository.findById(id).map(com.example.trafficvision.model.Video::getStatus).orElse(null);
+    private void saveAnalysisResult(Long videoId, int totalVehicles, int totalViolations, int frames, int lightsCount, DetectionResult lastRes) {
+        AnalysisResult result = new AnalysisResult();
+        result.setVideoId(videoId);
+        result.setVehicleCount(totalVehicles);
+        result.setViolationCount(totalViolations);
+        result.setTrafficDensity(frames > 0 ? (double) totalVehicles / frames : 0);
+        result.setCreatedAt(LocalDateTime.now());
+        result.setTrafficLightDetections(lightsCount);
+
+        if (lastRes != null) {
+            try {
+                // Chuyển đổi sang JSON để lưu
+                result.setSerializedTrafficLightRects(objectMapper.writeValueAsString(lastRes.getTrafficLightRects()));
+                result.setSerializedStopLines(objectMapper.writeValueAsString(lastRes.getStopLines()));
+            } catch (Exception e) {
+                logger.error("Serialization error: {}", e.getMessage());
+            }
+        }
+        analysisResultRepository.save(result);
     }
 
     /**
@@ -310,10 +267,12 @@ public class VideoProcessingService {
                     List<LineDto> stopLines = new ArrayList<>();
                     try {
                         if (ar.getSerializedTrafficLightRects() != null) {
-                            trafficLightRects = objectMapper.readValue(ar.getSerializedTrafficLightRects(), new com.fasterxml.jackson.core.type.TypeReference<List<RectDto>>() {});
+                            trafficLightRects = objectMapper.readValue(ar.getSerializedTrafficLightRects(), new com.fasterxml.jackson.core.type.TypeReference<List<RectDto>>() {
+                            });
                         }
                         if (ar.getSerializedStopLines() != null) {
-                            stopLines = objectMapper.readValue(ar.getSerializedStopLines(), new com.fasterxml.jackson.core.type.TypeReference<List<LineDto>>() {});
+                            stopLines = objectMapper.readValue(ar.getSerializedStopLines(), new com.fasterxml.jackson.core.type.TypeReference<List<LineDto>>() {
+                            });
                         }
                     } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
                         logger.error("Error deserializing RectDto/LineDto: {}", e.getMessage());
@@ -321,6 +280,13 @@ public class VideoProcessingService {
                     return new AnalysisResponse(id, ar.getVehicleCount(), ar.getViolationCount(), ar.getTrafficDensity(), ar.getCreatedAt(), ar.getTrafficLightDetections(), ar.getStopLinesDetected(), trafficLightRects, stopLines, trafficEvents);
                 })
                 .orElse(null);
+    }
+
+    /**
+     * Lấy trạng thái hiện tại của quy trình xử lý video.
+     */
+    public String getVideoStatus(Long id) {
+        return videoRepository.findById(id).map(com.example.trafficvision.model.Video::getStatus).orElse(null);
     }
 
     /**

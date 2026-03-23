@@ -15,50 +15,53 @@ public class TrafficLightDetector {
 
     private static final Logger logger = LoggerFactory.getLogger(TrafficLightDetector.class);
 
-    // RED
-    private static final Scalar LOWER_RED1 = new Scalar(0, 50, 50);
-    private static final Scalar UPPER_RED1 = new Scalar(15, 255, 255);
-    private static final Scalar LOWER_RED2 = new Scalar(160, 50, 50);
+    // ================= COLOR RANGE (Optimized) =================
+
+    private static final Scalar LOWER_RED1 = new Scalar(0, 70, 70);
+    private static final Scalar UPPER_RED1 = new Scalar(10, 255, 255);
+    private static final Scalar LOWER_RED2 = new Scalar(160, 70, 70);
     private static final Scalar UPPER_RED2 = new Scalar(179, 255, 255);
 
-    // GREEN
-    private static final Scalar LOWER_GREEN = new Scalar(30, 40, 40);
-    private static final Scalar UPPER_GREEN = new Scalar(95, 255, 255);
+    private static final Scalar LOWER_GREEN = new Scalar(40, 50, 50);
+    private static final Scalar UPPER_GREEN = new Scalar(90, 255, 255);
 
-    // YELLOW
-    private static final Scalar LOWER_YELLOW = new Scalar(10, 40, 40);
-    private static final Scalar UPPER_YELLOW = new Scalar(45, 255, 255);
+    private static final Scalar LOWER_YELLOW = new Scalar(15, 50, 50);
+    private static final Scalar UPPER_YELLOW = new Scalar(35, 255, 255);
 
-    private static final double MIN_TRAFFIC_LIGHT_AREA = 30;
-    private static final int STATE_BUFFER_SIZE = 10;
-    // Per-video state history
+    private static final double MIN_TRAFFIC_LIGHT_AREA = 15; // Slightly lower to catch distant lights
+    private static final int STATE_BUFFER_SIZE = 20; // Increased for better stability
+    private static final int BRIGHTNESS_BUFFER_SIZE = 15;
+
     private final Map<Long, LinkedList<String>> stateHistoryMap = new ConcurrentHashMap<>();
+    private final Map<Long, LinkedList<Double>> brightnessHistoryMap = new ConcurrentHashMap<>();
 
-    /**
-     * Xác định trạng thái đèn giao thông với cơ chế làm mượt theo thời gian và xử lý đèn đỏ nhấp nháy.
-     */
+
+    // =========================================================
+    // ================= DETECT TRẠNG THÁI ĐÈN =================
+    // =========================================================
+
     public String getTrafficLightState(Mat frame, Long videoId) {
 
         if (frame.empty()) return "UNKNOWN";
 
-        // ROI: Chỉ tập trung vào nửa trên của khung hình nơi đèn giao thông thường xuất hiện
+        // Mở rộng ROI để bao quát hơn (50% trên của khung hình)
         Rect roiRect = new Rect(0, 0, frame.cols(), (int) (frame.rows() * 0.5));
         Mat roi = frame.submat(roiRect);
 
-        // Chuyển sang không gian màu HSV để phân đoạn màu sắc tốt hơn dưới các điều kiện ánh sáng khác nhau
         Mat hsvFrame = new Mat();
         Imgproc.cvtColor(roi, hsvFrame, Imgproc.COLOR_BGR2HSV);
 
-        // Lấy thông tin contour lớn nhất cho từng màu (Đỏ, Xanh, Vàng)
+        // Lấy thông tin contour lớn nhất cho từng dải màu
         DetectionInfo red = getMaxContourInfo(hsvFrame, LOWER_RED1, UPPER_RED1, LOWER_RED2, UPPER_RED2);
         DetectionInfo green = getMaxContourInfo(hsvFrame, LOWER_GREEN, UPPER_GREEN, null, null);
         DetectionInfo yellow = getMaxContourInfo(hsvFrame, LOWER_YELLOW, UPPER_YELLOW, null, null);
 
+        DetectionInfo best = new DetectionInfo(0, new Rect(), new Point());
         String currentState = "UNKNOWN";
-        DetectionInfo best = red;
 
-        // Logic so sánh diện tích contour để xác định màu đèn hiện tại (phải vượt ngưỡng diện tích tối thiểu)
+        // Ưu tiên chọn đèn có diện tích lớn nhất và vượt ngưỡng tối thiểu
         if (red.area >= MIN_TRAFFIC_LIGHT_AREA) {
+            best = red;
             currentState = "RED";
         }
 
@@ -72,21 +75,26 @@ public class TrafficLightDetector {
             currentState = "YELLOW";
         }
 
-        // Cập nhật lịch sử trạng thái vào buffer để lọc nhiễu (Temporal Smoothing)
         updateStateHistory(videoId, currentState);
+        updateBrightnessHistory(videoId, getBrightness(roi, best.box));
 
-        // Lấy trạng thái xuất hiện nhiều nhất trong buffer (Dominant State)
-        String finalState = getDominantState(videoId);
+        // Lấy trạng thái ổn định nhất từ lịch sử (lọc nhiễu)
+        String finalState = getStableState(videoId);
 
-        // Xử lý đặc biệt cho đèn đỏ nhấp nháy (khi trạng thái xen kẽ giữa RED và UNKNOWN)
+        // Xử lý đèn đỏ nhấp nháy
         if (isFlashingRed(videoId)) {
             finalState = "RED";
         }
 
-        // Vẽ box debug lên frame
-        Imgproc.rectangle(frame, best.box, new Scalar(0, 0, 255), 2);
-        Imgproc.putText(frame, currentState, new Point(best.box.x, best.box.y - 5),
-                Imgproc.FONT_HERSHEY_SIMPLEX, 0.5, new Scalar(0, 0, 255), 2);
+        // Vẽ phản hồi trực quan nếu tìm thấy đèn
+        if (!"UNKNOWN".equals(finalState) && best.area > 0) {
+            // Hiệu chỉnh tọa độ box về frame gốc (nếu ROI không bắt đầu từ 0,0)
+            Rect drawBox = new Rect(best.box.x + roiRect.x, best.box.y + roiRect.y, best.box.width, best.box.height);
+            Scalar drawColor = getScalarColor(finalState);
+            Imgproc.rectangle(frame, drawBox, drawColor, 2);
+            Imgproc.putText(frame, "STATE: " + finalState, new Point(drawBox.x, drawBox.y - 10),
+                    Imgproc.FONT_HERSHEY_SIMPLEX, 0.6, drawColor, 2);
+        }
 
         hsvFrame.release();
         roi.release();
@@ -94,44 +102,166 @@ public class TrafficLightDetector {
         return finalState;
     }
 
-    private void updateStateHistory(Long videoId, String state) {
-
-        LinkedList<String> history = stateHistoryMap.computeIfAbsent(videoId, k -> new LinkedList<>());
-
-        history.add(state);
-
-        if (history.size() > STATE_BUFFER_SIZE) {
-            history.removeFirst();
+    private Scalar getScalarColor(String state) {
+        switch (state) {
+            case "RED": return new Scalar(0, 0, 255);
+            case "GREEN": return new Scalar(0, 255, 0);
+            case "YELLOW": return new Scalar(0, 255, 255);
+            default: return new Scalar(255, 255, 255);
         }
     }
 
-    private String getDominantState(Long videoId) {
+
+    // =========================================================
+    // ================= DETECT VỊ TRÍ ĐÈN (BẠN ĐANG DÙNG) =====
+    // =========================================================
+
+    public List<Rect> detectTrafficLights(Mat frame) {
+
+        List<Rect> trafficLights = new ArrayList<>();
+
+        if (frame.empty()) return trafficLights;
+
+        Rect roiRect = new Rect(0, 0, frame.cols(), (int) (frame.rows() * 0.5));
+        Mat roi = frame.submat(roiRect);
+
+        Mat hsv = new Mat();
+        Imgproc.cvtColor(roi, hsv, Imgproc.COLOR_BGR2HSV);
+
+        Mat mask1 = new Mat();
+        Mat mask2 = new Mat();
+        Core.inRange(hsv, LOWER_RED1, UPPER_RED1, mask1);
+        Core.inRange(hsv, LOWER_RED2, UPPER_RED2, mask2);
+
+        Mat redMask = new Mat();
+        Core.bitwise_or(mask1, mask2, redMask);
+
+        Imgproc.GaussianBlur(redMask, redMask, new Size(5, 5), 0);
+        Imgproc.morphologyEx(redMask, redMask, Imgproc.MORPH_CLOSE,
+                Imgproc.getStructuringElement(Imgproc.MORPH_RECT, new Size(5, 5)));
+
+        List<MatOfPoint> contours = new ArrayList<>();
+        Mat hierarchy = new Mat();
+
+        Imgproc.findContours(redMask, contours, hierarchy,
+                Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE);
+
+        for (MatOfPoint contour : contours) {
+
+            double area = Imgproc.contourArea(contour);
+            if (area < 60 || area > 1500) continue;
+
+            Rect box = Imgproc.boundingRect(contour);
+
+            double ratio = (double) box.width / box.height;
+            if (ratio < 0.6 || ratio > 1.4) continue;
+
+            trafficLights.add(box);
+            Imgproc.rectangle(frame, box, new Scalar(0, 0, 255), 2);
+
+            contour.release();
+        }
+
+        hsv.release();
+        mask1.release();
+        mask2.release();
+        redMask.release();
+        hierarchy.release();
+        roi.release();
+
+        return trafficLights;
+    }
+
+
+    // =========================================================
+    // ================= HELPER =================
+    // =========================================================
+
+    private void updateStateHistory(Long videoId, String state) {
+        LinkedList<String> history = stateHistoryMap.computeIfAbsent(videoId, k -> new LinkedList<>());
+        history.add(state);
+        if (history.size() > STATE_BUFFER_SIZE) history.removeFirst();
+    }
+
+    private void updateBrightnessHistory(Long videoId, double value) {
+        LinkedList<Double> history = brightnessHistoryMap.computeIfAbsent(videoId, k -> new LinkedList<>());
+        history.add(value);
+        if (history.size() > BRIGHTNESS_BUFFER_SIZE) history.removeFirst();
+    }
+
+    private String getStableState(Long videoId) {
 
         LinkedList<String> history = stateHistoryMap.get(videoId);
-
         if (history == null || history.isEmpty()) return "UNKNOWN";
 
         Map<String, Integer> counts = new HashMap<>();
-
         for (String s : history) {
             counts.put(s, counts.getOrDefault(s, 0) + 1);
         }
 
-        return Collections.max(counts.entrySet(), Map.Entry.comparingByValue()).getKey();
+        // Ưu tiên các trạng thái thực (RED, GREEN, YELLOW) hơn UNKNOWN
+        // Nếu một trạng thái thực có ít nhất 25% số lượng trong buffer, ta có thể cân nhắc nó
+        String bestState = "UNKNOWN";
+        int maxCount = 0;
+
+        for (Map.Entry<String, Integer> entry : counts.entrySet()) {
+            String state = entry.getKey();
+            int count = entry.getValue();
+
+            if ("UNKNOWN".equals(state)) continue;
+
+            if (count > maxCount) {
+                maxCount = count;
+                bestState = state;
+            }
+        }
+
+        // Nếu trạng thái thực tốt nhất chiếm ít nhất 30% buffer, chọn nó thay vì UNKNOWN
+        if (maxCount >= STATE_BUFFER_SIZE * 0.3) {
+            return bestState;
+        }
+
+        return counts.getOrDefault("UNKNOWN", 0) > (STATE_BUFFER_SIZE / 2) ? "UNKNOWN" : bestState;
     }
 
     private boolean isFlashingRed(Long videoId) {
 
-        LinkedList<String> history = stateHistoryMap.get(videoId);
-        if (history == null) return false;
+        LinkedList<String> states = stateHistoryMap.get(videoId);
+        LinkedList<Double> brightness = brightnessHistoryMap.get(videoId);
 
-        long redCount = history.stream().filter(s -> s.equals("RED")).count();
-        long unknownCount = history.stream().filter(s -> s.equals("UNKNOWN")).count();
+        if (states == null || brightness == null) return false;
+        if (states.size() < 6 || brightness.size() < 6) return false;
 
-        boolean noOtherColors = history.stream()
-                .noneMatch(s -> s.equals("GREEN") || s.equals("YELLOW"));
+        int flashCount = 0;
 
-        return redCount > 0 && unknownCount > 0 && noOtherColors;
+        for (int i = 1; i < brightness.size(); i++) {
+            if (brightness.get(i) > 170 && brightness.get(i - 1) < 80) flashCount++;
+        }
+
+        return flashCount >= 2;
+    }
+
+    private double getBrightness(Mat roi, Rect box) {
+
+        if (box.width == 0 || box.height == 0) return 0;
+
+        Rect safe = new Rect(
+                Math.max(box.x, 0),
+                Math.max(box.y, 0),
+                Math.min(box.width, roi.cols() - box.x),
+                Math.min(box.height, roi.rows() - box.y)
+        );
+
+        Mat lightRoi = roi.submat(safe);
+        Mat hsv = new Mat();
+        Imgproc.cvtColor(lightRoi, hsv, Imgproc.COLOR_BGR2HSV);
+
+        double brightness = Core.mean(hsv).val[2];
+
+        hsv.release();
+        lightRoi.release();
+
+        return brightness;
     }
 
     private DetectionInfo getMaxContourInfo(Mat hsv, Scalar l1, Scalar u1, Scalar l2, Scalar u2) {
@@ -145,6 +275,10 @@ public class TrafficLightDetector {
             Core.bitwise_or(mask, mask2, mask);
             mask2.release();
         }
+
+        Imgproc.GaussianBlur(mask, mask, new Size(5, 5), 0);
+        Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_CLOSE,
+                Imgproc.getStructuringElement(Imgproc.MORPH_RECT, new Size(5, 5)));
 
         List<MatOfPoint> contours = new ArrayList<>();
         Mat hierarchy = new Mat();
@@ -160,10 +294,29 @@ public class TrafficLightDetector {
 
             double area = Imgproc.contourArea(contour);
 
-            if (area > maxArea) {
+            // ---- 1. bỏ nhiễu nhỏ (giảm nhẹ để bắt đèn xa)
+            if (area < 15) continue;
 
+            // ---- 2. bỏ vật thể quá lớn (biển quảng cáo, v.v.)
+            if (area > 800) continue;
+
+            Rect box = Imgproc.boundingRect(contour);
+
+            // ---- 3. Tỷ lệ khung hình (nới lỏng để chấp nhận biến dạng phối cảnh)
+            double ratio = (double) box.width / box.height;
+            if (ratio < 0.3 || ratio > 2.8) continue;
+
+            // ---- 4. Độ tròn (nới lỏng vì phối cảnh có thể làm đèn trông dẹt)
+            double perimeter = Imgproc.arcLength(new MatOfPoint2f(contour.toArray()), true);
+            if (perimeter == 0) continue;
+
+            double circularity = 4 * Math.PI * area / (perimeter * perimeter);
+            if (circularity < 0.35) continue;
+
+            // ---- Nếu vượt qua các bộ lọc, chọn vùng có diện tích lớn nhất
+            if (area > maxArea) {
                 maxArea = area;
-                bestBox = Imgproc.boundingRect(contour);
+                bestBox = box;
 
                 Moments m = Imgproc.moments(contour);
                 if (m.m00 != 0) {
@@ -180,89 +333,7 @@ public class TrafficLightDetector {
         return new DetectionInfo(maxArea, bestBox, bestCentroid);
     }
 
-    public void clearHistory(Long videoId) {
-        stateHistoryMap.remove(videoId);
-    }
-
-    public List<Rect> detectTrafficLights(Mat frame) {
-
-        List<Rect> trafficLights = new ArrayList<>();
-
-        if (frame.empty()) return trafficLights;
-
-        // 1. Chỉ lấy vùng phía trên (đèn giao thông luôn nằm trên cao)
-        Rect roiRect = new Rect(0, 0, frame.cols(), (int) (frame.rows() * 0.5));
-        Mat roi = frame.submat(roiRect);
-
-        // 2. Chuyển sang HSV
-        Mat hsv = new Mat();
-        Imgproc.cvtColor(roi, hsv, Imgproc.COLOR_BGR2HSV);
-
-        // 3. Mask màu đỏ (2 vùng đỏ trong HSV)
-        Mat mask1 = new Mat();
-        Mat mask2 = new Mat();
-        Core.inRange(hsv, LOWER_RED1, UPPER_RED1, mask1);
-        Core.inRange(hsv, LOWER_RED2, UPPER_RED2, mask2);
-
-        Mat redMask = new Mat();
-        Core.bitwise_or(mask1, mask2, redMask);
-
-        // 4. Giảm nhiễu
-        Imgproc.GaussianBlur(redMask, redMask, new Size(5, 5), 0);
-        Imgproc.morphologyEx(redMask, redMask, Imgproc.MORPH_CLOSE,
-                Imgproc.getStructuringElement(Imgproc.MORPH_RECT, new Size(5, 5)));
-
-        // 5. Tìm contour
-        List<MatOfPoint> contours = new ArrayList<>();
-        Mat hierarchy = new Mat();
-
-        Imgproc.findContours(redMask, contours, hierarchy,
-                Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE);
-
-        // 6. Lọc contour để chỉ giữ đèn giao thông thật
-        for (MatOfPoint contour : contours) {
-
-            double area = Imgproc.contourArea(contour);
-
-            // Lọc diện tích (loại nhiễu nhỏ + biển quảng cáo lớn)
-            if (area < 60 || area > 1500) continue;
-
-            Rect box = Imgproc.boundingRect(contour);
-
-            // Hình gần tròn
-            double perimeter = Imgproc.arcLength(new MatOfPoint2f(contour.toArray()), true);
-            double circularity = 4 * Math.PI * area / (perimeter * perimeter);
-            if (circularity < 0.5) continue;
-
-            // Bounding box gần vuông
-            double ratio = (double) box.width / box.height;
-            if (ratio < 0.7 || ratio > 1.3) continue;
-
-            // Không quá to (biển quảng cáo sẽ bị loại)
-            if (box.width > 80 || box.height > 80) continue;
-
-            // Phải nằm phía trên frame
-            if (box.y > roi.rows() * 0.8) continue;
-
-            trafficLights.add(box);
-
-            // Debug box
-            Imgproc.rectangle(frame, box, new Scalar(0, 0, 255), 2);
-        }
-
-        // 7. Giải phóng bộ nhớ
-        hsv.release();
-        mask1.release();
-        mask2.release();
-        redMask.release();
-        hierarchy.release();
-        roi.release();
-
-        return trafficLights;
-    }
-
     private static class DetectionInfo {
-
         double area;
         Rect box;
         Point centroid;

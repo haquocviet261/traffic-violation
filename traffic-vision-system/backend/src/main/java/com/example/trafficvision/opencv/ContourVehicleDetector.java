@@ -1,6 +1,8 @@
 package com.example.trafficvision.opencv;
 
-import org.opencv.core.*;
+import org.opencv.core.Mat;
+import org.opencv.core.MatOfPoint;
+import org.opencv.core.Rect;
 import org.opencv.imgproc.Imgproc;
 import org.springframework.stereotype.Component;
 
@@ -15,7 +17,7 @@ import java.util.List;
 public class ContourVehicleDetector {
 
     // Diện tích tối thiểu của một đường bao để được coi là phương tiện (giúp loại bỏ nhiễu nhỏ)
-    private static final double MIN_VEHICLE_AREA = 450;
+    private static final double MIN_VEHICLE_AREA = 650;
 
     /**
      * Phát hiện các phương tiện từ mặt nạ chuyển động.
